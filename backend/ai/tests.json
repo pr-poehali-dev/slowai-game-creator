@@ -1,0 +1,17 @@
+{
+  "tests": [
+    {
+      "name": "OPTIONS preflight",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    },
+    {
+      "name": "Empty messages",
+      "method": "POST",
+      "path": "/",
+      "body": {"mode": "chat", "messages": []},
+      "expectedStatus": 400
+    }
+  ]
+}

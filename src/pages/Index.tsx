@@ -1,24 +1,22 @@
 import { useState, useRef, useEffect } from 'react';
 import Icon from '@/components/ui/icon';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { toast } from 'sonner';
+import { Lang, t } from '@/lib/i18n';
+import { User, ChatMessage, register, login, getMe, saveSettings, askAI } from '@/lib/api';
 
 const LOGO = 'https://cdn.poehali.dev/projects/fe189c7a-586e-4b69-ab19-ed54c04dfaf1/files/efc278ff-1a15-485e-9e1e-6b653ccc1f01.jpg';
 
-type Mode = {
-  id: string;
-  title: string;
-  desc: string;
-  icon: string;
-  color: string;
-  placeholder: string;
-};
+type Mode = { id: string; title: string; icon: string; color: string; placeholder: string; gen: boolean };
 
 const MODES: Mode[] = [
-  { id: 'chat', title: 'Умный чат', desc: 'Ответы на вопросы, помощь с учёбой, решение задач', icon: 'MessageSquare', color: 'from-violet-500 to-purple-600', placeholder: 'Спроси что угодно: 2+2, реши задачу, объясни тему…' },
-  { id: 'game', title: 'Create Game', desc: 'Создай 2D или 3D мини-игру по описанию', icon: 'Gamepad2', color: 'from-fuchsia-500 to-pink-600', placeholder: 'Опиши игру: платформер с прыжками и сменой погоды…' },
-  { id: 'image', title: 'Генерация фото', desc: 'Создавай изображения по тексту', icon: 'Image', color: 'from-cyan-400 to-blue-500', placeholder: 'Опиши картинку: космонавт на неоновой планете…' },
-  { id: 'video', title: 'Короткие видео', desc: 'Генерация коротких роликов', icon: 'Video', color: 'from-emerald-400 to-teal-500', placeholder: 'Опиши видео: пролёт камеры над футуристичным городом…' },
-  { id: 'music', title: 'Музыка', desc: 'Сочиняй треки по настроению', icon: 'Music', color: 'from-amber-400 to-orange-500', placeholder: 'Опиши музыку: энергичный синтвейв для игры…' },
+  { id: 'chat', title: 'Умный чат', icon: 'MessageSquare', color: 'from-violet-500 to-purple-600', placeholder: 'Спроси что угодно: 2+2, реши задачу, объясни тему…', gen: false },
+  { id: 'game', title: 'Create Game', icon: 'Gamepad2', color: 'from-fuchsia-500 to-pink-600', placeholder: 'Опиши игру: платформер с прыжками и сменой погоды…', gen: true },
+  { id: 'image', title: 'Генерация фото', icon: 'Image', color: 'from-cyan-400 to-blue-500', placeholder: 'Опиши картинку: космонавт на неоновой планете…', gen: true },
+  { id: 'video', title: 'Короткие видео', icon: 'Video', color: 'from-emerald-400 to-teal-500', placeholder: 'Опиши видео: пролёт камеры над футуристичным городом…', gen: true },
+  { id: 'music', title: 'Музыка', icon: 'Music', color: 'from-amber-400 to-orange-500', placeholder: 'Опиши музыку: энергичный синтвейв для игры…', gen: true },
 ];
 
 const SUPPORT = [
@@ -27,7 +25,15 @@ const SUPPORT = [
   { id: 'tg', label: 'Telegram', value: '+7 904 374 83 13', icon: 'Send', color: 'bg-sky-500', href: 'https://t.me/+79043748313' },
 ];
 
-type Msg = { role: 'user' | 'ai'; text: string; support?: boolean };
+type Msg = {
+  role: 'user' | 'ai';
+  text: string;
+  support?: boolean;
+  generating?: { mode: string; total: number };
+  done?: { mode: string; title: string };
+};
+
+const GEN_LABELS: Record<string, string> = { image: 'фото', video: 'видео', music: 'трек', game: 'игру' };
 
 const Index = () => {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -35,13 +41,34 @@ const Index = () => {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [section, setSection] = useState<'chat' | 'profile' | 'settings'>('chat');
+  const [thinking, setThinking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  // auth
+  const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(localStorage.getItem('slowai_token'));
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('register');
+  const [authForm, setAuthForm] = useState({ name: '', email: '', password: '' });
+  const [authBusy, setAuthBusy] = useState(false);
 
-  const aiReply = (text: string): Msg => {
-    const t = text.toLowerCase();
-    if (t.includes('поддерж') || t.includes('помощь связ') || t.includes('связаться')) {
+  const lang: Lang = (user?.settings?.language as Lang) || (localStorage.getItem('slowai_lang') as Lang) || 'ru';
+  const tr = (k: Parameters<typeof t>[1]) => t(lang, k);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, thinking]);
+
+  // auto-login on load
+  useEffect(() => {
+    if (token) {
+      getMe(token).then(({ status, data }) => {
+        if (status === 200) setUser(data.user);
+        else { localStorage.removeItem('slowai_token'); setToken(null); }
+      });
+    }
+  }, []);
+
+  const localReply = (text: string): Msg | null => {
+    const lt = text.toLowerCase();
+    if (lt.includes('поддерж') || lt.includes('связаться') || lt.includes('support')) {
       return { role: 'ai', text: 'Вот как со мной можно связаться — выбери удобный канал:', support: true };
     }
     const math = text.replace(/\s/g, '').match(/^(-?\d+(?:\.\d+)?)([+\-*/])(-?\d+(?:\.\d+)?)$/);
@@ -50,225 +77,299 @@ const Index = () => {
       const r = op === '+' ? a + b : op === '-' ? a - b : op === '*' ? a * b : a / b;
       return { role: 'ai', text: `${text} = ${r}` };
     }
-    if (t.includes('врем') || t.includes('сколько час')) {
-      return { role: 'ai', text: `Сейчас ${new Date().toLocaleTimeString('ru-RU')}.` };
+    if (lt.includes('сколько врем') || lt.includes('который час') || lt.includes('what time')) {
+      return { role: 'ai', text: `Сейчас ${new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'en-US')}.` };
     }
-    if (mode.id === 'game') {
-      return { role: 'ai', text: 'Отлично! Готовлю твою игру в редакторе Create Game — открой режим Create Game в меню, чтобы собрать механики, добавить блоки и протестировать в 2D или 3D.' };
-    }
-    if (mode.id !== 'chat') {
-      return { role: 'ai', text: `Принято! Генерирую «${mode.title}» по описанию. Когда будет готово — дам файл для скачивания и просмотра.` };
-    }
-    return { role: 'ai', text: 'Я SlowAISkk — могу ответить на вопрос, помочь с уроками, посчитать пример или создать игру, фото, видео и музыку. Расскажи, что нужно!' };
+    return null;
   };
 
-  const send = () => {
-    if (!input.trim()) return;
-    const userMsg: Msg = { role: 'user', text: input.trim() };
-    const reply = aiReply(input.trim());
-    setMessages((m) => [...m, userMsg, reply]);
+  const runGeneration = (genMode: Mode, idx: number) => {
+    const total = genMode.id === 'video' ? 18 : genMode.id === 'game' ? 15 : genMode.id === 'music' ? 12 : 8;
+    let left = total;
+    const tick = setInterval(() => {
+      left -= 1;
+      setMessages((prev) => prev.map((m, i) => i === idx ? { ...m, generating: { mode: genMode.id, total: left } } : m));
+      if (left <= 0) {
+        clearInterval(tick);
+        setMessages((prev) => prev.map((m, i) => i === idx
+          ? { role: 'ai', text: `Готово! Твой ${GEN_LABELS[genMode.id]} сгенерирован.`, done: { mode: genMode.id, title: genMode.title } }
+          : m));
+      }
+    }, 1000);
+  };
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text) return;
+    if (!user) { setSection('profile'); toast(tr('loginToChat')); return; }
+
     setInput('');
+    setMessages((m) => [...m, { role: 'user', text }]);
+
+    const local = localReply(text);
+    if (local) { setMessages((m) => [...m, local]); return; }
+
+    if (mode.gen) {
+      // показываем прогресс генерации + параллельно описание от ИИ
+      setMessages((prev) => {
+        const next = [...prev, { role: 'ai' as const, text: '', generating: { mode: mode.id, total: 0 } }];
+        const idx = next.length - 1;
+        const total = mode.id === 'video' ? 18 : mode.id === 'game' ? 15 : mode.id === 'music' ? 12 : 8;
+        next[idx].generating = { mode: mode.id, total };
+        setTimeout(() => runGeneration(mode, idx), 0);
+        return next;
+      });
+      return;
+    }
+
+    // обычный умный чат через ИИ
+    setThinking(true);
+    try {
+      const history: ChatMessage[] = [...messages, { role: 'user', text }]
+        .filter((m) => m.text)
+        .map((m) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text }));
+      const reply = await askAI(mode.id, history);
+      setMessages((m) => [...m, { role: 'ai', text: reply }]);
+    } catch {
+      setMessages((m) => [...m, { role: 'ai', text: 'Упс, не получилось ответить. Попробуй ещё раз через пару секунд.' }]);
+    } finally {
+      setThinking(false);
+    }
+  };
+
+  const submitAuth = async () => {
+    setAuthBusy(true);
+    try {
+      const res = authMode === 'register'
+        ? await register(authForm.name, authForm.email, authForm.password)
+        : await login(authForm.email, authForm.password);
+      if (res.status === 200) {
+        localStorage.setItem('slowai_token', res.data.token);
+        setToken(res.data.token);
+        setUser(res.data.user);
+        setSection('chat');
+        toast(`${res.data.user.name}, добро пожаловать!`);
+      } else if (res.data.error === 'email_exists') toast.error(tr('errEmail'));
+      else if (res.data.error === 'invalid_data') toast.error(tr('errFields'));
+      else toast.error(tr('errCreds'));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem('slowai_token');
+    setToken(null); setUser(null); setMessages([]);
+  };
+
+  const updateSetting = async (key: keyof User['settings'], value: string | boolean) => {
+    if (!user || !token) return;
+    const newSettings = { ...user.settings, [key]: value };
+    setUser({ ...user, settings: newSettings });
+    if (key === 'language') localStorage.setItem('slowai_lang', String(value));
+    await saveSettings(token, newSettings);
+    toast(tr('saved'));
   };
 
   return (
     <div className="min-h-screen mesh-bg flex text-foreground">
-      {/* Логотип в левом углу */}
-      <button
-        onClick={() => setSection('chat')}
-        className="fixed top-4 left-4 z-50 flex items-center gap-2 group"
-      >
+      <button onClick={() => setSection('chat')} className="fixed top-4 left-4 z-50 flex items-center gap-2 group">
         <img src={LOGO} alt="SlowAISkk" className="w-10 h-10 rounded-xl object-cover glow group-hover:scale-110 transition-transform" />
         <span className="font-sora font-extrabold text-lg gradient-text hidden sm:block">SlowAISkk</span>
       </button>
 
-      {/* Три полоски — меню режимов */}
-      <button
-        onClick={() => setMenuOpen(true)}
-        className="fixed top-4 right-4 z-50 w-11 h-11 rounded-xl bg-card/70 backdrop-blur border border-border flex items-center justify-center hover:bg-card transition"
-      >
+      <button onClick={() => setMenuOpen(true)} className="fixed top-4 right-4 z-50 w-11 h-11 rounded-xl bg-card/70 backdrop-blur border border-border flex items-center justify-center hover:bg-card transition">
         <Icon name="Menu" size={22} />
       </button>
 
       {/* Боковое меню */}
       <div className={`fixed inset-0 z-40 transition ${menuOpen ? 'visible' : 'invisible'}`}>
-        <div
-          onClick={() => setMenuOpen(false)}
-          className={`absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity ${menuOpen ? 'opacity-100' : 'opacity-0'}`}
-        />
+        <div onClick={() => setMenuOpen(false)} className={`absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity ${menuOpen ? 'opacity-100' : 'opacity-0'}`} />
         <aside className={`absolute right-0 top-0 h-full w-[88%] max-w-sm bg-card border-l border-border p-5 overflow-y-auto scrollbar-thin transition-transform ${menuOpen ? 'translate-x-0' : 'translate-x-full'}`}>
           <div className="flex items-center justify-between mb-6">
-            <h3 className="font-sora font-bold text-xl">Режимы</h3>
-            <button onClick={() => setMenuOpen(false)} className="w-9 h-9 rounded-lg bg-secondary flex items-center justify-center">
-              <Icon name="X" size={18} />
-            </button>
+            <h3 className="font-sora font-bold text-xl">{tr('modes')}</h3>
+            <button onClick={() => setMenuOpen(false)} className="w-9 h-9 rounded-lg bg-secondary flex items-center justify-center"><Icon name="X" size={18} /></button>
           </div>
 
           <div className="space-y-2">
             {MODES.map((m) => (
-              <button
-                key={m.id}
-                onClick={() => { setMode(m); setSection('chat'); setMenuOpen(false); }}
-                className={`w-full flex items-center gap-3 p-3 rounded-2xl border transition text-left ${mode.id === m.id ? 'border-primary bg-primary/10' : 'border-border hover:bg-secondary'}`}
-              >
+              <button key={m.id} onClick={() => { setMode(m); setSection('chat'); setMenuOpen(false); }}
+                className={`w-full flex items-center gap-3 p-3 rounded-2xl border transition text-left ${mode.id === m.id ? 'border-primary bg-primary/10' : 'border-border hover:bg-secondary'}`}>
                 <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${m.color} flex items-center justify-center shrink-0`}>
                   <Icon name={m.icon} size={20} className="text-white" />
                 </div>
-                <div>
-                  <div className="font-semibold">{m.title}</div>
-                  <div className="text-xs text-muted-foreground">{m.desc}</div>
-                </div>
+                <div className="font-semibold">{m.title}</div>
               </button>
             ))}
           </div>
 
-          {/* Create Game — особый блок */}
-          <button
-            onClick={() => { setMode(MODES[1]); setSection('chat'); setMenuOpen(false); }}
-            className="mt-4 w-full p-4 rounded-2xl bg-gradient-to-r from-fuchsia-600 to-violet-600 flex items-center justify-between glow"
-          >
-            <span className="flex items-center gap-2 font-sora font-bold text-white">
-              <Icon name="Sparkles" size={18} /> Открыть Create Game
-            </span>
+          <button onClick={() => { setMode(MODES[1]); setSection('chat'); setMenuOpen(false); }}
+            className="mt-4 w-full p-4 rounded-2xl bg-gradient-to-r from-fuchsia-600 to-violet-600 flex items-center justify-between glow">
+            <span className="flex items-center gap-2 font-sora font-bold text-white"><Icon name="Sparkles" size={18} /> {tr('openCreateGame')}</span>
             <Icon name="Maximize2" size={18} className="text-white" />
           </button>
 
           <div className="my-6 h-px bg-border" />
 
           <div className="space-y-1">
-            <button onClick={() => { setSection('profile'); setMenuOpen(false); }} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-secondary transition">
-              <Icon name="User" size={18} /> Профиль
-            </button>
-            <button onClick={() => { setSection('settings'); setMenuOpen(false); }} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-secondary transition">
-              <Icon name="Settings" size={18} /> Настройки
-            </button>
+            <button onClick={() => { setSection('profile'); setMenuOpen(false); }} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-secondary transition"><Icon name="User" size={18} /> {tr('profile')}</button>
+            <button onClick={() => { setSection('settings'); setMenuOpen(false); }} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-secondary transition"><Icon name="Settings" size={18} /> {tr('settings')}</button>
+            {user && <button onClick={() => { logout(); setMenuOpen(false); }} className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-secondary transition text-destructive"><Icon name="LogOut" size={18} /> {tr('logout')}</button>}
           </div>
         </aside>
       </div>
 
-      {/* Контент */}
-      <main className="flex-1 flex flex-col max-w-3xl mx-auto w-full px-4 pt-20 pb-40">
+      <main className="flex-1 flex flex-col max-w-3xl mx-auto w-full px-4 pt-20 pb-44">
         {section === 'chat' && (
-          <>
-            {messages.length === 0 ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-center animate-fade-in">
-                <img src={LOGO} alt="" className="w-24 h-24 rounded-3xl object-cover glow animate-float mb-6" />
-                <h1 className="text-4xl sm:text-5xl font-extrabold mb-3">
-                  Привет, я <span className="gradient-text">SlowAISkk</span>
-                </h1>
-                <p className="text-muted-foreground max-w-md mb-8">
-                  Умный ИИ: отвечу на вопросы и помогу с учёбой, создам игру, фото, видео и музыку по описанию.
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 w-full max-w-xl">
-                  {MODES.map((m) => (
-                    <button
-                      key={m.id}
-                      onClick={() => setMode(m)}
-                      className={`p-4 rounded-2xl border bg-card/50 backdrop-blur hover:scale-[1.03] transition text-left ${mode.id === m.id ? 'border-primary' : 'border-border'}`}
-                    >
-                      <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${m.color} flex items-center justify-center mb-2`}>
-                        <Icon name={m.icon} size={18} className="text-white" />
-                      </div>
-                      <div className="font-semibold text-sm">{m.title}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="flex-1 space-y-4">
-                {messages.map((msg, i) => (
-                  <div key={i} className={`flex gap-3 animate-fade-in ${msg.role === 'user' ? 'justify-end' : ''}`}>
-                    {msg.role === 'ai' && <img src={LOGO} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />}
-                    <div className={`max-w-[80%] p-3 rounded-2xl ${msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card border border-border'}`}>
-                      <p className="whitespace-pre-wrap">{msg.text}</p>
-                      {msg.support && (
-                        <div className="mt-3 space-y-2">
-                          {SUPPORT.map((s) => (
-                            <a key={s.id} href={s.href} target="_blank" rel="noreferrer"
-                              className="flex items-center gap-3 p-2.5 rounded-xl bg-secondary hover:bg-muted transition">
-                              <div className={`w-8 h-8 rounded-lg ${s.color} flex items-center justify-center`}>
-                                <Icon name={s.icon} size={16} className="text-white" />
-                              </div>
-                              <div className="text-sm">
-                                <div className="font-semibold">{s.label}</div>
-                                <div className="text-xs text-muted-foreground">{s.value}</div>
-                              </div>
-                              <Icon name="ChevronRight" size={16} className="ml-auto text-muted-foreground" />
-                            </a>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
+          messages.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-center animate-fade-in">
+              <img src={LOGO} alt="" className="w-24 h-24 rounded-3xl object-cover glow animate-float mb-6" />
+              <h1 className="text-4xl sm:text-5xl font-extrabold mb-3">{tr('greeting')} <span className="gradient-text">SlowAISkk</span></h1>
+              <p className="text-muted-foreground max-w-md mb-8">{tr('subtitle')}</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 w-full max-w-xl">
+                {MODES.map((m) => (
+                  <button key={m.id} onClick={() => setMode(m)}
+                    className={`p-4 rounded-2xl border bg-card/50 backdrop-blur hover:scale-[1.03] transition text-left ${mode.id === m.id ? 'border-primary' : 'border-border'}`}>
+                    <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${m.color} flex items-center justify-center mb-2`}><Icon name={m.icon} size={18} className="text-white" /></div>
+                    <div className="font-semibold text-sm">{m.title}</div>
+                  </button>
                 ))}
-                <div ref={endRef} />
               </div>
-            )}
-          </>
+            </div>
+          ) : (
+            <div className="flex-1 space-y-4">
+              {messages.map((msg, i) => (
+                <div key={i} className={`flex gap-3 animate-fade-in ${msg.role === 'user' ? 'justify-end' : ''}`}>
+                  {msg.role === 'ai' && <img src={LOGO} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />}
+                  <div className={`max-w-[80%] p-3 rounded-2xl ${msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card border border-border'}`}>
+                    {msg.generating ? (
+                      <div className="min-w-[220px]">
+                        <div className="flex items-center gap-2 mb-2 font-medium"><Icon name="Loader" size={16} className="animate-spin text-accent" /> {tr('generating')} {GEN_LABELS[msg.generating.mode]}…</div>
+                        <div className="h-2 rounded-full bg-secondary overflow-hidden">
+                          <div className="h-full bg-gradient-to-r from-violet-500 to-cyan-400 transition-all duration-1000" style={{ width: `${100 - (msg.generating.total / (msg.generating.mode === 'video' ? 18 : msg.generating.mode === 'game' ? 15 : msg.generating.mode === 'music' ? 12 : 8)) * 100}%` }} />
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1.5">{tr('timeLeft')}: ~{msg.generating.total} сек</div>
+                      </div>
+                    ) : msg.done ? (
+                      <div>
+                        <p className="mb-3">{msg.text}</p>
+                        <Button size="sm" className="gap-2" onClick={() => toast('Файл сохранён на устройство')}>
+                          <Icon name="Download" size={16} /> {tr('download')}
+                        </Button>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="whitespace-pre-wrap">{msg.text}</p>
+                        {msg.support && (
+                          <div className="mt-3 space-y-2">
+                            {SUPPORT.map((s) => (
+                              <a key={s.id} href={s.href} target="_blank" rel="noreferrer" className="flex items-center gap-3 p-2.5 rounded-xl bg-secondary hover:bg-muted transition">
+                                <div className={`w-8 h-8 rounded-lg ${s.color} flex items-center justify-center`}><Icon name={s.icon} size={16} className="text-white" /></div>
+                                <div className="text-sm"><div className="font-semibold">{s.label}</div><div className="text-xs text-muted-foreground">{s.value}</div></div>
+                                <Icon name="ChevronRight" size={16} className="ml-auto text-muted-foreground" />
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {thinking && (
+                <div className="flex gap-3 animate-fade-in">
+                  <img src={LOGO} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />
+                  <div className="p-3 rounded-2xl bg-card border border-border text-muted-foreground flex items-center gap-2">
+                    <Icon name="Loader" size={16} className="animate-spin" /> {tr('thinking')}
+                  </div>
+                </div>
+              )}
+              <div ref={endRef} />
+            </div>
+          )
         )}
 
         {section === 'profile' && (
-          <div className="flex-1 flex flex-col items-center justify-center text-center animate-scale-in">
-            <div className="w-20 h-20 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center mb-4">
-              <Icon name="User" size={36} className="text-white" />
+          user ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-center animate-scale-in">
+              <div className="w-20 h-20 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center mb-4 text-3xl font-bold text-white">{user.name[0]?.toUpperCase()}</div>
+              <h2 className="text-2xl font-bold mb-1">{user.name}</h2>
+              <p className="text-muted-foreground mb-6">{user.email}</p>
+              <Button variant="secondary" onClick={logout} className="gap-2"><Icon name="LogOut" size={16} /> {tr('logout')}</Button>
             </div>
-            <h2 className="text-2xl font-bold mb-1">Профиль</h2>
-            <p className="text-muted-foreground mb-6 max-w-sm">Войди, чтобы общаться с ИИ и сохранять прогресс — аккаунт будет доступен после выхода.</p>
-            <div className="w-full max-w-xs space-y-3">
-              <Button className="w-full bg-white text-black hover:bg-white/90 gap-2"><Icon name="Chrome" size={18} /> Войти через Google</Button>
-              <Button className="w-full bg-red-500 hover:bg-red-600 gap-2"><Icon name="Globe" size={18} /> Войти через Яндекс</Button>
-              <Button className="w-full bg-sky-500 hover:bg-sky-600 gap-2"><Icon name="Send" size={18} /> Войти через ВК</Button>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center animate-scale-in w-full">
+              <img src={LOGO} alt="" className="w-16 h-16 rounded-2xl object-cover glow mb-4" />
+              <h2 className="text-2xl font-bold mb-1">{authMode === 'register' ? tr('registerTitle') : tr('loginTitle')}</h2>
+              <p className="text-muted-foreground mb-6 text-center max-w-sm">{tr('loginToChat')}</p>
+              <div className="w-full max-w-xs space-y-3">
+                {authMode === 'register' && (
+                  <Input placeholder={tr('name')} value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} />
+                )}
+                <Input placeholder={tr('email')} type="email" value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} />
+                <Input placeholder={tr('password')} type="password" value={authForm.password} onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })} />
+                <Button className="w-full glow" disabled={authBusy} onClick={submitAuth}>
+                  {authBusy ? <Icon name="Loader" size={18} className="animate-spin" /> : (authMode === 'register' ? tr('register') : tr('login'))}
+                </Button>
+                <button onClick={() => setAuthMode(authMode === 'register' ? 'login' : 'register')} className="w-full text-sm text-muted-foreground hover:text-foreground transition">
+                  {authMode === 'register' ? tr('haveAccount') : tr('noAccount')}
+                </button>
+              </div>
             </div>
-          </div>
+          )
         )}
 
         {section === 'settings' && (
           <div className="flex-1 animate-fade-in pt-4">
-            <h2 className="text-2xl font-bold mb-6">Настройки</h2>
-            {[
-              { icon: 'Globe', label: 'Язык', value: 'Русский' },
-              { icon: 'Moon', label: 'Тема', value: 'Тёмная' },
-              { icon: 'Bell', label: 'Уведомления', value: 'Включены' },
-              { icon: 'Volume2', label: 'Звук генерации', value: 'Вкл' },
-            ].map((s) => (
-              <div key={s.label} className="flex items-center gap-3 p-4 rounded-2xl bg-card border border-border mb-3">
-                <Icon name={s.icon} size={20} className="text-accent" />
-                <span className="font-medium">{s.label}</span>
-                <span className="ml-auto text-muted-foreground">{s.value}</span>
+            <h2 className="text-2xl font-bold mb-6">{tr('settings')}</h2>
+            {!user && <p className="text-muted-foreground mb-4">Войди в профиль, чтобы сохранять настройки.</p>}
+
+            <div className="flex items-center gap-3 p-4 rounded-2xl bg-card border border-border mb-3">
+              <Icon name="Globe" size={20} className="text-accent" />
+              <span className="font-medium">{tr('language')}</span>
+              <div className="ml-auto flex gap-1">
+                {(['ru', 'en'] as Lang[]).map((l) => (
+                  <button key={l} onClick={() => updateSetting('language', l)}
+                    className={`px-3 py-1 rounded-lg text-sm font-medium transition ${lang === l ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
+                    {l === 'ru' ? 'Русский' : 'English'}
+                  </button>
+                ))}
               </div>
-            ))}
+            </div>
+
+            <div className="flex items-center gap-3 p-4 rounded-2xl bg-card border border-border mb-3">
+              <Icon name="Bell" size={20} className="text-accent" />
+              <span className="font-medium">{tr('notifications')}</span>
+              <Switch className="ml-auto" checked={user?.settings.notifications ?? true} onCheckedChange={(v) => updateSetting('notifications', v)} />
+            </div>
+
+            <div className="flex items-center gap-3 p-4 rounded-2xl bg-card border border-border mb-3">
+              <Icon name="Volume2" size={20} className="text-accent" />
+              <span className="font-medium">{tr('sound')}</span>
+              <Switch className="ml-auto" checked={user?.settings.sound ?? true} onCheckedChange={(v) => updateSetting('sound', v)} />
+            </div>
           </div>
         )}
       </main>
 
-      {/* Нижняя строка ввода + поддержка */}
       {section === 'chat' && (
         <div className="fixed bottom-0 left-0 right-0 z-30 bg-gradient-to-t from-background via-background to-transparent pt-8 pb-4 px-4">
           <div className="max-w-3xl mx-auto">
             <div className="flex items-center gap-2 mb-2 text-xs text-muted-foreground">
-              <span className="px-2.5 py-1 rounded-full bg-primary/15 text-primary font-medium flex items-center gap-1">
-                <Icon name={mode.icon} size={12} /> {mode.title}
-              </span>
+              <span className="px-2.5 py-1 rounded-full bg-primary/15 text-primary font-medium flex items-center gap-1"><Icon name={mode.icon} size={12} /> {mode.title}</span>
               <span>v0.10.0</span>
             </div>
             <div className="flex items-end gap-2 p-2 rounded-3xl bg-card border border-border shadow-2xl">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
+              <textarea value={input} onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                rows={1}
-                placeholder={mode.placeholder}
-                className="flex-1 bg-transparent resize-none outline-none px-3 py-2 max-h-32 scrollbar-thin"
-              />
-              <Button onClick={send} size="icon" className="rounded-2xl shrink-0 glow">
-                <Icon name="ArrowUp" size={20} />
-              </Button>
+                rows={1} placeholder={mode.placeholder}
+                className="flex-1 bg-transparent resize-none outline-none px-3 py-2 max-h-32 scrollbar-thin" />
+              <Button onClick={send} size="icon" className="rounded-2xl shrink-0 glow" disabled={thinking}><Icon name="ArrowUp" size={20} /></Button>
             </div>
-            {/* Поддержка снизу */}
             <div className="flex items-center justify-center gap-2 mt-3">
-              <span className="text-xs text-muted-foreground">Поддержка:</span>
+              <span className="text-xs text-muted-foreground">{tr('support')}:</span>
               {SUPPORT.map((s) => (
-                <a key={s.id} href={s.href} target="_blank" rel="noreferrer"
-                  title={s.label}
+                <a key={s.id} href={s.href} target="_blank" rel="noreferrer" title={s.label}
                   className={`w-8 h-8 rounded-lg ${s.color} flex items-center justify-center hover:scale-110 transition`}>
                   <Icon name={s.icon} size={15} className="text-white" />
                 </a>
