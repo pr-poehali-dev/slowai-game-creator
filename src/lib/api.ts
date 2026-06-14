@@ -1,12 +1,22 @@
 const AUTH_URL = 'https://functions.poehali.dev/7806a32f-aa71-4e8c-99cd-c36fc427c823';
 const AI_URL = 'https://functions.poehali.dev/56e2b223-de4f-4e1a-8834-4da0784052f2';
 
+export type UserSettings = {
+  language: string;
+  theme: string;
+  notifications: boolean;
+  sound: boolean;
+  voiceReply?: boolean;
+  voice?: string;
+  speed?: number;
+};
+
 export type User = {
   id: number;
   name: string;
   email: string;
   provider: string;
-  settings: { language: string; theme: string; notifications: boolean; sound: boolean };
+  settings: UserSettings;
 };
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
@@ -34,7 +44,7 @@ export async function getMe(token: string) {
   return { status: r.status, data: await r.json() };
 }
 
-export async function saveSettings(token: string, settings: User['settings']) {
+export async function saveSettings(token: string, settings: UserSettings) {
   const r = await fetch(AUTH_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Auth-Token': token },

@@ -4,8 +4,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
-import { Lang, t } from '@/lib/i18n';
+import { Lang, t, LANGUAGES } from '@/lib/i18n';
 import { User, ChatMessage, register, login, getMe, saveSettings, askAI } from '@/lib/api';
+import { speak, stopSpeak, getVoices, createRecognition, downloadGeneration } from '@/lib/voice';
 
 const LOGO = 'https://cdn.poehali.dev/projects/fe189c7a-586e-4b69-ab19-ed54c04dfaf1/files/efc278ff-1a15-485e-9e1e-6b653ccc1f01.jpg';
 
@@ -30,7 +31,7 @@ type Msg = {
   text: string;
   support?: boolean;
   generating?: { mode: string; total: number };
-  done?: { mode: string; title: string };
+  done?: { mode: string; title: string; prompt: string };
 };
 
 const GEN_LABELS: Record<string, string> = { image: 'фото', video: 'видео', music: 'трек', game: 'игру' };
@@ -42,6 +43,9 @@ const Index = () => {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [section, setSection] = useState<'chat' | 'profile' | 'settings'>('chat');
   const [thinking, setThinking] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const recRef = useRef<ReturnType<typeof createRecognition>>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   // auth
@@ -53,6 +57,7 @@ const Index = () => {
 
   const lang: Lang = (user?.settings?.language as Lang) || (localStorage.getItem('slowai_lang') as Lang) || 'ru';
   const tr = (k: Parameters<typeof t>[1]) => t(lang, k);
+  const voiceOn = user?.settings?.voiceReply ?? false;
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, thinking]);
 
@@ -66,24 +71,65 @@ const Index = () => {
     }
   }, []);
 
+  // загрузка голосов синтезатора
+  useEffect(() => {
+    const load = () => setVoices(getVoices());
+    load();
+    if ('speechSynthesis' in window) window.speechSynthesis.onvoiceschanged = load;
+  }, []);
+
+  const pushAI = (msg: Msg) => {
+    setMessages((m) => [...m, msg]);
+    if (voiceOn && msg.text && !msg.generating) {
+      speak(msg.text, lang, user?.settings?.voice, user?.settings?.speed ?? 1);
+    }
+  };
+
+  const sayText = (text: string) => speak(text, lang, user?.settings?.voice, user?.settings?.speed ?? 1);
+
   const localReply = (text: string): Msg | null => {
-    const lt = text.toLowerCase();
+    const lt = text.toLowerCase().trim();
     if (lt.includes('поддерж') || lt.includes('связаться') || lt.includes('support')) {
       return { role: 'ai', text: 'Вот как со мной можно связаться — выбери удобный канал:', support: true };
     }
-    const math = text.replace(/\s/g, '').match(/^(-?\d+(?:\.\d+)?)([+\-*/])(-?\d+(?:\.\d+)?)$/);
-    if (math) {
-      const a = parseFloat(math[1]); const op = math[2]; const b = parseFloat(math[3]);
-      const r = op === '+' ? a + b : op === '-' ? a - b : op === '*' ? a * b : a / b;
-      return { role: 'ai', text: `${text} = ${r}` };
+    // приветствия / прощания
+    if (/^(привет|здаров|здравствуй|хай|hello|hi|hey)\b/.test(lt)) {
+      return { role: 'ai', text: 'Привет! 👋 Я SlowAISkk. Чем помочь — посчитать, придумать текст, объяснить тему или создать игру, фото, видео и музыку?' };
     }
-    if (lt.includes('сколько врем') || lt.includes('который час') || lt.includes('what time')) {
-      return { role: 'ai', text: `Сейчас ${new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'en-US')}.` };
+    if (/^(пока|до свидания|bye|goodbye|увидимся)\b/.test(lt)) {
+      return { role: 'ai', text: 'Пока! 👋 Возвращайся, если что — буду рад помочь!' };
+    }
+    if (/(как тебя зовут|твоё имя|твое имя|who are you|кто ты)/.test(lt)) {
+      return { role: 'ai', text: 'Я SlowAISkk — твой умный ИИ-ассистент. Могу считать, писать тексты, отвечать на вопросы и создавать контент.' };
+    }
+    // время и дата на устройстве
+    const loc = lang === 'ru' ? 'ru-RU' : lang === 'zh' ? 'zh-CN' : lang === 'de' ? 'de-DE' : lang === 'fr' ? 'fr-FR' : lang === 'es' ? 'es-ES' : 'en-US';
+    if (/(сколько (сейчас )?врем|который час|what time|текущее время)/.test(lt)) {
+      return { role: 'ai', text: `Сейчас на твоём устройстве ${new Date().toLocaleTimeString(loc)}.` };
+    }
+    if (/(какое (сегодня )?число|какой сегодня день|what.*date|сегодняшняя дата)/.test(lt)) {
+      return { role: 'ai', text: `Сегодня ${new Date().toLocaleDateString(loc, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.` };
+    }
+    // математика: символы и слова
+    const expr = lt
+      .replace(/умнож(ь|ить|им)?( на)?|times|multipl\w*|\bна\b/g, '*')
+      .replace(/раздел(и|ить|им)?( на)?|divide\w*|делённое|деленное/g, '/')
+      .replace(/прибав(ь|ить|им)?|плюс|сложи\w*|add|plus/g, '+')
+      .replace(/отними|отнять|вычти\w*|минус|minus|subtract\w*/g, '-')
+      .replace(/сколько будет|посчитай|вычисли|чему равно|equals?|=/g, '')
+      .replace(/[?]/g, '')
+      .replace(/,/g, '.');
+    const m = expr.replace(/\s/g, '').match(/^(-?\d+(?:\.\d+)?)([+\-*/])(-?\d+(?:\.\d+)?)$/);
+    if (m) {
+      const a = parseFloat(m[1]); const op = m[2]; const b = parseFloat(m[3]);
+      if (op === '/' && b === 0) return { role: 'ai', text: 'На ноль делить нельзя 🙂' };
+      const r = op === '+' ? a + b : op === '-' ? a - b : op === '*' ? a * b : a / b;
+      return { role: 'ai', text: `${a} ${op} ${b} = ${Number(r.toFixed(6))}` };
     }
     return null;
   };
 
-  const runGeneration = (genMode: Mode, idx: number) => {
+  const runGeneration = (genMode: Mode, idx: number, prompt: string) => {
     const total = genMode.id === 'video' ? 18 : genMode.id === 'game' ? 15 : genMode.id === 'music' ? 12 : 8;
     let left = total;
     const tick = setInterval(() => {
@@ -91,15 +137,17 @@ const Index = () => {
       setMessages((prev) => prev.map((m, i) => i === idx ? { ...m, generating: { mode: genMode.id, total: left } } : m));
       if (left <= 0) {
         clearInterval(tick);
+        const doneText = `Готово! Твой ${GEN_LABELS[genMode.id]} сгенерирован. Нажми «Скачать», чтобы сохранить на устройство.`;
         setMessages((prev) => prev.map((m, i) => i === idx
-          ? { role: 'ai', text: `Готово! Твой ${GEN_LABELS[genMode.id]} сгенерирован.`, done: { mode: genMode.id, title: genMode.title } }
+          ? { role: 'ai', text: doneText, done: { mode: genMode.id, title: genMode.title, prompt } }
           : m));
+        if (voiceOn) sayText(doneText);
       }
     }, 1000);
   };
 
-  const send = async () => {
-    const text = input.trim();
+  const send = async (override?: string) => {
+    const text = (override ?? input).trim();
     if (!text) return;
     if (!user) { setSection('profile'); toast(tr('loginToChat')); return; }
 
@@ -107,16 +155,14 @@ const Index = () => {
     setMessages((m) => [...m, { role: 'user', text }]);
 
     const local = localReply(text);
-    if (local) { setMessages((m) => [...m, local]); return; }
+    if (local) { pushAI(local); return; }
 
     if (mode.gen) {
-      // показываем прогресс генерации + параллельно описание от ИИ
       setMessages((prev) => {
-        const next = [...prev, { role: 'ai' as const, text: '', generating: { mode: mode.id, total: 0 } }];
-        const idx = next.length - 1;
         const total = mode.id === 'video' ? 18 : mode.id === 'game' ? 15 : mode.id === 'music' ? 12 : 8;
-        next[idx].generating = { mode: mode.id, total };
-        setTimeout(() => runGeneration(mode, idx), 0);
+        const next = [...prev, { role: 'ai' as const, text: '', generating: { mode: mode.id, total } }];
+        const idx = next.length - 1;
+        setTimeout(() => runGeneration(mode, idx, text), 0);
         return next;
       });
       return;
@@ -129,12 +175,27 @@ const Index = () => {
         .filter((m) => m.text)
         .map((m) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text }));
       const reply = await askAI(mode.id, history);
-      setMessages((m) => [...m, { role: 'ai', text: reply }]);
+      pushAI({ role: 'ai', text: reply });
     } catch {
-      setMessages((m) => [...m, { role: 'ai', text: 'Упс, не получилось ответить. Попробуй ещё раз через пару секунд.' }]);
+      pushAI({ role: 'ai', text: 'Упс, не получилось ответить. Попробуй ещё раз через пару секунд.' });
     } finally {
       setThinking(false);
     }
+  };
+
+  const toggleMic = () => {
+    if (listening) { recRef.current?.stop(); return; }
+    const rec = createRecognition(lang);
+    if (!rec) { toast.error(tr('micUnsupported')); return; }
+    recRef.current = rec;
+    rec.onresult = (e) => {
+      const said = e.results[0][0].transcript;
+      setInput(said);
+      setListening(false);
+      setTimeout(() => send(said), 100);
+    };
+    rec.onend = () => setListening(false);
+    try { rec.start(); setListening(true); } catch { toast.error(tr('micDenied')); }
   };
 
   const submitAuth = async () => {
@@ -158,17 +219,18 @@ const Index = () => {
   };
 
   const logout = () => {
+    stopSpeak();
     localStorage.removeItem('slowai_token');
     setToken(null); setUser(null); setMessages([]);
   };
 
-  const updateSetting = async (key: keyof User['settings'], value: string | boolean) => {
+  const updateSetting = async (key: keyof User['settings'], value: string | number | boolean) => {
     if (!user || !token) return;
     const newSettings = { ...user.settings, [key]: value };
     setUser({ ...user, settings: newSettings });
     if (key === 'language') localStorage.setItem('slowai_lang', String(value));
     await saveSettings(token, newSettings);
-    toast(tr('saved'));
+    if (key !== 'speed') toast(tr('saved'));
   };
 
   return (
@@ -253,7 +315,7 @@ const Index = () => {
                     ) : msg.done ? (
                       <div>
                         <p className="mb-3">{msg.text}</p>
-                        <Button size="sm" className="gap-2" onClick={() => toast('Файл сохранён на устройство')}>
+                        <Button size="sm" className="gap-2" onClick={() => { downloadGeneration(msg.done!.mode, msg.done!.prompt); toast('Файл сохраняется на устройство'); }}>
                           <Icon name="Download" size={16} /> {tr('download')}
                         </Button>
                       </div>
@@ -270,6 +332,12 @@ const Index = () => {
                               </a>
                             ))}
                           </div>
+                        )}
+                        {msg.role === 'ai' && msg.text && (
+                          <button onClick={() => sayText(msg.text)}
+                            className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition">
+                            <Icon name="Volume2" size={14} /> {tr('listen')}
+                          </button>
                         )}
                       </>
                     )}
@@ -324,17 +392,51 @@ const Index = () => {
             <h2 className="text-2xl font-bold mb-6">{tr('settings')}</h2>
             {!user && <p className="text-muted-foreground mb-4">Войди в профиль, чтобы сохранять настройки.</p>}
 
-            <div className="flex items-center gap-3 p-4 rounded-2xl bg-card border border-border mb-3">
-              <Icon name="Globe" size={20} className="text-accent" />
-              <span className="font-medium">{tr('language')}</span>
-              <div className="ml-auto flex gap-1">
-                {(['ru', 'en'] as Lang[]).map((l) => (
-                  <button key={l} onClick={() => updateSetting('language', l)}
-                    className={`px-3 py-1 rounded-lg text-sm font-medium transition ${lang === l ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
-                    {l === 'ru' ? 'Русский' : 'English'}
+            <div className="p-4 rounded-2xl bg-card border border-border mb-3">
+              <div className="flex items-center gap-3 mb-3">
+                <Icon name="Globe" size={20} className="text-accent" />
+                <span className="font-medium">{tr('language')}</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {LANGUAGES.map((l) => (
+                  <button key={l.id} onClick={() => updateSetting('language', l.id)}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${lang === l.id ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
+                    {l.label}
                   </button>
                 ))}
               </div>
+            </div>
+
+            <div className="flex items-center gap-3 p-4 rounded-2xl bg-card border border-border mb-3">
+              <Icon name="MessageCircle" size={20} className="text-accent" />
+              <span className="font-medium">{tr('voiceReply')}</span>
+              <Switch className="ml-auto" checked={user?.settings.voiceReply ?? false} onCheckedChange={(v) => updateSetting('voiceReply', v)} />
+            </div>
+
+            <div className="p-4 rounded-2xl bg-card border border-border mb-3">
+              <div className="flex items-center gap-3 mb-3">
+                <Icon name="Mic" size={20} className="text-accent" />
+                <span className="font-medium">{tr('voice')}</span>
+              </div>
+              <select
+                value={user?.settings.voice ?? ''}
+                onChange={(e) => updateSetting('voice', e.target.value)}
+                className="w-full bg-secondary rounded-lg px-3 py-2 outline-none text-sm">
+                <option value="">Авто (по языку)</option>
+                {voices.map((v) => <option key={v.name} value={v.name}>{v.name} ({v.lang})</option>)}
+              </select>
+              <div className="flex items-center gap-3 mt-4">
+                <Icon name="Gauge" size={18} className="text-accent" />
+                <span className="text-sm">{tr('speed')}</span>
+                <input type="range" min={0.6} max={1.6} step={0.1}
+                  value={user?.settings.speed ?? 1}
+                  onChange={(e) => updateSetting('speed', parseFloat(e.target.value))}
+                  className="ml-auto flex-1 max-w-[140px] accent-primary" />
+                <span className="text-sm w-8 text-right">{(user?.settings.speed ?? 1).toFixed(1)}×</span>
+              </div>
+              <Button size="sm" variant="secondary" className="mt-3 gap-2" onClick={() => sayText('Привет! Это мой голос. Я SlowAISkk.')}>
+                <Icon name="Play" size={14} /> Проверить голос
+              </Button>
             </div>
 
             <div className="flex items-center gap-3 p-4 rounded-2xl bg-card border border-border mb-3">
@@ -360,11 +462,15 @@ const Index = () => {
               <span>v0.10.0</span>
             </div>
             <div className="flex items-end gap-2 p-2 rounded-3xl bg-card border border-border shadow-2xl">
+              <button onClick={toggleMic} title={tr('listening')}
+                className={`w-11 h-11 rounded-2xl shrink-0 flex items-center justify-center transition ${listening ? 'bg-red-500 text-white animate-pulse' : 'bg-secondary hover:bg-muted'}`}>
+                <Icon name="Mic" size={20} />
+              </button>
               <textarea value={input} onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                rows={1} placeholder={mode.placeholder}
+                rows={1} placeholder={listening ? tr('listening') : mode.placeholder}
                 className="flex-1 bg-transparent resize-none outline-none px-3 py-2 max-h-32 scrollbar-thin" />
-              <Button onClick={send} size="icon" className="rounded-2xl shrink-0 glow" disabled={thinking}><Icon name="ArrowUp" size={20} /></Button>
+              <Button onClick={() => send()} size="icon" className="rounded-2xl shrink-0 glow" disabled={thinking}><Icon name="ArrowUp" size={20} /></Button>
             </div>
             <div className="flex items-center justify-center gap-2 mt-3">
               <span className="text-xs text-muted-foreground">{tr('support')}:</span>
